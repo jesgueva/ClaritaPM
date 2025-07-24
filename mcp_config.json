@@ -1,0 +1,17 @@
+{
+  "mcpServers": {
+    "clarita-pm": {
+      "command": "python",
+      "args": ["-m", "mcp_server"],
+      "cwd": ".",
+      "env": {
+        "PYTHONPATH": "."
+      }
+    },
+    "hello-mcp-docker": {
+      "command": "docker",
+      "args": ["run", "--rm", "-i", "hello-mcp-server"],
+      "cwd": "."
+    }
+  }
+} 
