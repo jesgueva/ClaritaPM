@@ -1,17 +1,12 @@
 {
-  "mcpServers": {
-    "clarita-pm": {
-      "command": "python",
-      "args": ["-m", "mcp_server"],
-      "cwd": ".",
-      "env": {
-        "PYTHONPATH": "."
-      }
-    },
-    "hello-mcp-docker": {
-      "command": "docker",
-      "args": ["run", "--rm", "-i", "hello-mcp-server"],
-      "cwd": "."
+  "clarita-pm-dev": {
+    "command": "/Users/jesusesgueva/dev/ClaritaPM/.venv/bin/python",
+    "args": ["-u", "/Users/jesusesgueva/dev/ClaritaPM/main.py"],
+    "cwd": "/Users/jesusesgueva/dev/ClaritaPM",
+    "env": {
+      "PYTHONPATH": "/Users/jesusesgueva/dev/ClaritaPM",
+      "VIRTUAL_ENV": "/Users/jesusesgueva/dev/ClaritaPM/.venv",
+      "PYTHONUNBUFFERED": "1"
     }
   }
 } 

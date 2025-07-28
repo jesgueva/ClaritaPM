@@ -11,15 +11,11 @@ from langchain_openai import ChatOpenAI
 from langchain_community.llms import Ollama
 from langchain_core.runnables import RunnablePassthrough
 
-# Configure logging
-logging.basicConfig(
-    level=logging.DEBUG,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
+# Get logger (logging configured centrally in main.py)
 logger = logging.getLogger(__name__)
 
 # Configuration for LLM endpoint
-LLM_API_BASE = os.getenv("LLM_API_BASE", "http://127.0.0.1:1234/")
+LLM_API_BASE = os.getenv("LLM_API_BASE", "http://127.0.0.1:1234/v1")
 LLM_API_KEY = os.getenv("LLM_API_KEY", "lm-studio")
 LLM_MODEL = os.getenv("LLM_MODEL", "devstral-small-2505")
 
@@ -27,14 +23,7 @@ LLM_MODEL = os.getenv("LLM_MODEL", "devstral-small-2505")
 USE_OPENAI = os.getenv("USE_OPENAI", "false").lower() == "true"
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 
-# Log configuration on startup
-logger.info("=== LLM Parser Configuration ===")
-logger.info(f"LLM_API_BASE: {LLM_API_BASE}")
-logger.info(f"LLM_API_KEY: {LLM_API_KEY[:8]}..." if LLM_API_KEY else "None")
-logger.info(f"LLM_MODEL: {LLM_MODEL}")
-logger.info(f"USE_OPENAI: {USE_OPENAI}")
-logger.info(f"OPENAI_API_KEY: {OPENAI_API_KEY[:8]}..." if OPENAI_API_KEY else "None")
-logger.info("================================")
+
 
 # Pydantic model for structured output
 class FeatureRequest(BaseModel):
@@ -51,8 +40,22 @@ class FeatureRequest(BaseModel):
         default=None
     )
 
+# Pydantic model for validation responses
+class ValidationResponse(BaseModel):
+    can_proceed_autonomously: bool = Field(
+        description="Whether we have enough information to proceed autonomously"
+    )
+    missing_info: Optional[list] = Field(
+        description="List of missing information items",
+        default=None
+    )
+    suggestions: Optional[list] = Field(
+        description="List of suggested questions to ask the user",
+        default=None
+    )
+
 # System prompt for feature extraction
-SYSTEM_PROMPT = """You are a helpful assistant that extracts structured information from feature requests.
+SYSTEM_PROMPT = """You are a helpful assistant that extracts structured information from feature requests and exploration queries.
 
 Given a user request, identify and extract the following information:
 - target_page: Which page the feature should be added to
@@ -63,33 +66,108 @@ If information is missing, use null.
 
 Examples:
 Input: "Add a save button to the dashboard page"
-Output: {"target_page": "dashboard", "feature_type": "button", "action": "save"}
+Output: {{"target_page": "dashboard", "feature_type": "button", "action": "save"}}
 
 Input: "Create a contact form on the about page"
-Output: {"target_page": "about", "feature_type": "form", "action": "submit"}
+Output: {{"target_page": "about", "feature_type": "form", "action": "submit"}}
 
 Input: "Let's add a button to this page"
-Output: {"target_page": null, "feature_type": "button", "action": null}"""
+Output: {{"target_page": null, "feature_type": "button", "action": null}}
+
+Input: "Explore how to implement real-time notifications"
+Output: {{"target_page": null, "feature_type": "notifications", "action": "real-time"}}
+
+Input: "How can we add user authentication to the app?"
+Output: {{"target_page": null, "feature_type": "authentication", "action": "login"}}
+
+Input: "I want to investigate adding a search feature"
+Output: {{"target_page": null, "feature_type": "search", "action": "query"}}"""
+
+# System prompt for validation
+VALIDATION_PROMPT = """You are a helpful assistant that validates feature requests to determine if there's enough information to create comprehensive Jira tickets.
+
+Given a feature request and parsed information, determine if we can proceed autonomously or need clarification.
+
+Return a JSON object with:
+- can_proceed_autonomously: true/false
+- missing_info: list of missing information (if any)
+- suggestions: list of questions to ask the user (if any)
+
+Examples:
+Input: "Add a save button to the dashboard" with parsed data showing target_page: "dashboard", feature_type: "button", action: "save"
+Output: {{"can_proceed_autonomously": true, "missing_info": null, "suggestions": null}}
+
+Input: "Add a button" with parsed data showing target_page: null, feature_type: "button", action: null
+Output: {{"can_proceed_autonomously": false, "missing_info": ["target_page", "action"], "suggestions": ["Which page should the button be added to?", "What should the button do when clicked?"]}}
+
+Input: "Implement real-time collaboration" with parsed data showing target_page: null, feature_type: "collaboration", action: "real-time"
+Output: {{"can_proceed_autonomously": false, "missing_info": ["target_page", "specific_features"], "suggestions": ["Which page or component should have collaboration?", "What specific collaboration features are needed (chat, document editing, etc.)?"]}}"""
 
 def parse_with_llm(description: str) -> Dict[str, Any]:
     """Parse feature request using LangChain LLM"""
-    logger.info(f"=== Starting LLM parsing for: '{description}' ===")
-    
-    try:
-        if USE_OPENAI and OPENAI_API_KEY:
-            logger.info("Using OpenAI for parsing")
-            return _parse_with_langchain_openai(description)
-        else:
-            logger.info("Using local LLM for parsing")
-            return _parse_with_langchain_local(description)
-    except Exception as e:
-        logger.error(f"LangChain LLM parsing failed: {e}", exc_info=True)
-        logger.info("Falling back to simple regex parsing")
-        return _fallback_parsing(description)
+    if USE_OPENAI and OPENAI_API_KEY:
+        return _parse_with_langchain_openai(description)
+    else:
+        return _parse_with_langchain_local(description)
+
+def parse_validation_with_llm(description: str) -> Dict[str, Any]:
+    """Parse validation request using LangChain LLM"""
+    if USE_OPENAI and OPENAI_API_KEY:
+        return _parse_validation_with_langchain_openai(description)
+    else:
+        return _parse_validation_with_langchain_local(description)
+
+def parse_text_with_llm(description: str) -> str:
+    """Parse text request using LangChain LLM (returns plain text, not JSON)"""
+    if USE_OPENAI and OPENAI_API_KEY:
+        return _parse_text_with_langchain_openai(description)
+    else:
+        return _parse_text_with_langchain_local(description)
 
 def _parse_with_langchain_local(description: str) -> Dict[str, Any]:
     """Parse using LangChain with local LLM (LM Studio, Ollama, etc.)"""
-    logger.info("Attempting to initialize local LLM with ChatOpenAI")
+    try:
+        # Create ChatOpenAI with only the necessary parameters to avoid proxy issues
+        llm = ChatOpenAI(
+            model=LLM_MODEL,
+            openai_api_base=LLM_API_BASE,
+            openai_api_key=LLM_API_KEY,
+            temperature=0.1,
+            max_tokens=200,
+            # Explicitly set to None to avoid proxy issues
+            http_client=None,
+            http_async_client=None
+        )
+        
+        return _create_langchain_chain(llm, description, "ChatOpenAI")
+        
+    except Exception as e:
+        logger.error(f"Failed to initialize ChatOpenAI: {e}", exc_info=True)
+        raise Exception("LM Studio is not available")
+
+def _parse_with_langchain_openai(description: str) -> Dict[str, Any]:
+    """Parse using LangChain with OpenAI API"""
+    try:
+        llm = ChatOpenAI(
+            model="gpt-3.5-turbo",
+            openai_api_key=OPENAI_API_KEY,
+            temperature=0.1,
+            max_tokens=200,
+            # Explicitly set to None to avoid proxy issues
+            http_client=None,
+            http_async_client=None
+        )
+        
+        return _create_langchain_chain(llm, description, "OpenAI")
+        
+    except Exception as e:
+        logger.error(f"Failed to initialize OpenAI: {e}", exc_info=True)
+        raise Exception("OpenAI initialization failed")
+
+def _parse_validation_with_langchain_local(description: str) -> Dict[str, Any]:
+    """Parse validation using LangChain with local LLM (LM Studio, Ollama, etc.)"""
+    logger.info("Attempting to initialize local LLM with ChatOpenAI for validation")
+    logger.info(f"Connecting to local LLM: base={LLM_API_BASE}, model={LLM_MODEL}, key={'set' if LLM_API_KEY else 'not set'}")
     
     try:
         # Create LangChain model
@@ -97,36 +175,28 @@ def _parse_with_langchain_local(description: str) -> Dict[str, Any]:
         logger.debug(f"API Base: {LLM_API_BASE}")
         logger.debug(f"API Key: {LLM_API_KEY[:8]}..." if LLM_API_KEY else "None")
         
+        # Create ChatOpenAI with only the necessary parameters to avoid proxy issues
         llm = ChatOpenAI(
             model=LLM_MODEL,
             openai_api_base=LLM_API_BASE,
             openai_api_key=LLM_API_KEY,
             temperature=0.1,
-            max_tokens=200
+            max_tokens=200,
+            # Explicitly set to None to avoid proxy issues
+            http_client=None,
+            http_async_client=None
         )
         
-        logger.info("ChatOpenAI initialized successfully")
-        return _create_langchain_chain(llm, description, "ChatOpenAI")
+        logger.info("ChatOpenAI initialized successfully for validation")
+        return _create_validation_langchain_chain(llm, description, "ChatOpenAI")
         
     except Exception as e:
-        logger.error(f"Failed to initialize ChatOpenAI: {e}", exc_info=True)
-        # Try Ollama as fallback
-        logger.info("Attempting to initialize Ollama as fallback")
-        try:
-            logger.debug(f"Creating Ollama with model: {LLM_MODEL}")
-            llm = Ollama(
-                model=LLM_MODEL,
-                temperature=0.1
-            )
-            logger.info("Ollama initialized successfully")
-            return _create_langchain_chain(llm, description, "Ollama")
-        except Exception as ollama_error:
-            logger.error(f"Failed to initialize Ollama: {ollama_error}", exc_info=True)
-            raise Exception("No local LLM available")
+        logger.error(f"Failed to initialize ChatOpenAI for validation: {e}", exc_info=True)
+        raise Exception("LM Studio is not available for validation")
 
-def _parse_with_langchain_openai(description: str) -> Dict[str, Any]:
-    """Parse using LangChain with OpenAI API"""
-    logger.info("Attempting to initialize OpenAI")
+def _parse_validation_with_langchain_openai(description: str) -> Dict[str, Any]:
+    """Parse validation using LangChain with OpenAI API"""
+    logger.info("Attempting to initialize OpenAI for validation")
     
     try:
         logger.debug(f"Creating OpenAI ChatOpenAI with API key: {OPENAI_API_KEY[:8]}...")
@@ -134,43 +204,36 @@ def _parse_with_langchain_openai(description: str) -> Dict[str, Any]:
             model="gpt-3.5-turbo",
             openai_api_key=OPENAI_API_KEY,
             temperature=0.1,
-            max_tokens=200
+            max_tokens=200,
+            # Explicitly set to None to avoid proxy issues
+            http_client=None,
+            http_async_client=None
         )
         
-        logger.info("OpenAI initialized successfully")
-        return _create_langchain_chain(llm, description, "OpenAI")
+        logger.info("OpenAI initialized successfully for validation")
+        return _create_validation_langchain_chain(llm, description, "OpenAI")
         
     except Exception as e:
-        logger.error(f"Failed to initialize OpenAI: {e}", exc_info=True)
-        raise Exception("OpenAI initialization failed")
+        logger.error(f"Failed to initialize OpenAI for validation: {e}", exc_info=True)
+        raise Exception("OpenAI initialization failed for validation")
 
 def _create_langchain_chain(llm, description: str, llm_type: str) -> Dict[str, Any]:
     """Create and run LangChain chain for feature parsing"""
-    logger.info(f"Creating LangChain chain with {llm_type}")
-    
     try:
         # Create prompt template
-        logger.debug("Creating ChatPromptTemplate")
         prompt = ChatPromptTemplate.from_messages([
             ("system", SYSTEM_PROMPT),
             ("user", "{input}")
         ])
-        logger.debug("ChatPromptTemplate created successfully")
         
         # Create output parser
-        logger.debug("Creating JsonOutputParser with FeatureRequest model")
         parser = JsonOutputParser(pydantic_object=FeatureRequest)
-        logger.debug("JsonOutputParser created successfully")
         
         # Create chain
-        logger.debug("Creating chain: prompt | llm | parser")
         chain = prompt | llm | parser
-        logger.debug("Chain created successfully")
         
         # Run the chain
-        logger.info(f"Invoking chain with input: '{description}'")
         result = chain.invoke({"input": description})
-        logger.info(f"Chain execution successful. Raw result: {result}")
         
         # Validate and format result
         parsed_result = {
@@ -180,16 +243,151 @@ def _create_langchain_chain(llm, description: str, llm_type: str) -> Dict[str, A
             "original_request": description
         }
         
-        logger.info(f"Parsed result: {parsed_result}")
-        logger.info(f"=== LLM parsing completed successfully with {llm_type} ===")
-        
         return parsed_result
         
     except Exception as e:
         logger.error(f"Chain execution failed: {e}", exc_info=True)
+        raise Exception(f"LangChain parsing failed: {e}")
+
+def _parse_text_with_langchain_local(description: str) -> str:
+    """Parse text using LangChain with local LLM (LM Studio, Ollama, etc.)"""
+    logger.info("Attempting to initialize local LLM with ChatOpenAI for text parsing")
+    logger.info(f"Connecting to local LLM: base={LLM_API_BASE}, model={LLM_MODEL}, key={'set' if LLM_API_KEY else 'not set'}")
+    
+    try:
+        # Create LangChain model
+        logger.debug(f"Creating ChatOpenAI with model: {LLM_MODEL}")
+        logger.debug(f"API Base: {LLM_API_BASE}")
+        logger.debug(f"API Key: {LLM_API_KEY[:8]}..." if LLM_API_KEY else "None")
+        
+        # Create ChatOpenAI with only the necessary parameters to avoid parameter conflicts
+        llm = ChatOpenAI(
+            model=LLM_MODEL,
+            openai_api_base=LLM_API_BASE,
+            openai_api_key=LLM_API_KEY,
+            max_tokens=1000,
+            temperature=0.1
+        )
+        logger.info("ChatOpenAI initialized successfully for text parsing")
+        
+        # Create simple text chain (no JSON parsing)
+        logger.info("Creating text LangChain chain with ChatOpenAI")
+        logger.debug("Creating ChatPromptTemplate for text")
+        prompt = ChatPromptTemplate.from_messages([
+            ("system", "You are a helpful assistant that generates comprehensive text responses. Provide detailed, well-structured responses."),
+            ("user", "{input}")
+        ])
+        logger.debug("ChatPromptTemplate for text created successfully")
+        
+        # Create simple chain without JSON parser
+        logger.debug("Creating text chain: prompt | llm")
+        chain = prompt | llm
+        logger.debug("Text chain created successfully")
+        
+        # Invoke the chain
+        logger.info(f"Invoking text chain with input: '{description[:100]}...'")
+        result = chain.invoke({"input": description})
+        logger.info("Text chain execution successful")
+        
+        # Return the text content
+        text_content = result.content if hasattr(result, 'content') else str(result)
+        logger.info(f"Text parsing completed successfully with ChatOpenAI")
+        return text_content
+        
+    except Exception as e:
+        logger.error(f"Failed to initialize ChatOpenAI: {e}")
         logger.error(f"LLM type: {llm_type}")
         logger.error(f"Input description: {description}")
-        raise Exception(f"LangChain parsing failed: {e}")
+        raise Exception(f"LangChain text parsing failed: {e}")
+
+def _parse_text_with_langchain_openai(description: str) -> str:
+    """Parse text using LangChain with OpenAI"""
+    logger.info("Attempting to initialize OpenAI for text parsing")
+    
+    try:
+        # Create OpenAI model
+        llm = ChatOpenAI(
+            model="gpt-3.5-turbo",
+            openai_api_key=OPENAI_API_KEY,
+            max_tokens=1000,
+            temperature=0.1
+        )
+        logger.info("OpenAI initialized successfully for text parsing")
+        
+        # Create simple text chain (no JSON parsing)
+        logger.info("Creating text LangChain chain with OpenAI")
+        logger.debug("Creating ChatPromptTemplate for text")
+        prompt = ChatPromptTemplate.from_messages([
+            ("system", "You are a helpful assistant that generates comprehensive text responses. Provide detailed, well-structured responses."),
+            ("user", "{input}")
+        ])
+        logger.debug("ChatPromptTemplate for text created successfully")
+        
+        # Create simple chain without JSON parser
+        logger.debug("Creating text chain: prompt | llm")
+        chain = prompt | llm
+        logger.debug("Text chain created successfully")
+        
+        # Invoke the chain
+        logger.info(f"Invoking text chain with input: '{description[:100]}...'")
+        result = chain.invoke({"input": description})
+        logger.info("Text chain execution successful")
+        
+        # Return the text content
+        text_content = result.content if hasattr(result, 'content') else str(result)
+        logger.info(f"Text parsing completed successfully with OpenAI")
+        return text_content
+        
+    except Exception as e:
+        logger.error(f"Failed to initialize OpenAI: {e}")
+        raise Exception(f"OpenAI text parsing failed: {e}")
+
+def _create_validation_langchain_chain(llm, description: str, llm_type: str) -> Dict[str, Any]:
+    """Create and run LangChain chain for validation parsing"""
+    logger.info(f"Creating validation LangChain chain with {llm_type}")
+    
+    try:
+        # Create prompt template
+        logger.debug("Creating ChatPromptTemplate for validation")
+        prompt = ChatPromptTemplate.from_messages([
+            ("system", VALIDATION_PROMPT),
+            ("user", "{input}")
+        ])
+        logger.debug("ChatPromptTemplate for validation created successfully")
+        
+        # Create output parser
+        logger.debug("Creating JsonOutputParser with ValidationResponse model")
+        parser = JsonOutputParser(pydantic_object=ValidationResponse)
+        logger.debug("JsonOutputParser for validation created successfully")
+        
+        # Create chain
+        logger.debug("Creating validation chain: prompt | llm | parser")
+        chain = prompt | llm | parser
+        logger.debug("Validation chain created successfully")
+        
+        # Run the chain
+        logger.info(f"Invoking validation chain with input: '{description}'")
+        result = chain.invoke({"input": description})
+        logger.info(f"Validation chain execution successful. Raw result: {result}")
+        
+        # Validate and format result
+        validation_result = {
+            "can_proceed_autonomously": result.get("can_proceed_autonomously", False),
+            "missing_info": result.get("missing_info"),
+            "suggestions": result.get("suggestions"),
+            "original_request": description
+        }
+        
+        logger.info(f"Validation result: {validation_result}")
+        logger.info(f"=== LLM validation parsing completed successfully with {llm_type} ===")
+        
+        return validation_result
+        
+    except Exception as e:
+        logger.error(f"Validation chain execution failed: {e}", exc_info=True)
+        logger.error(f"LLM type: {llm_type}")
+        logger.error(f"Input description: {description}")
+        raise Exception(f"LangChain validation parsing failed: {e}")
 
 def _fallback_parsing(description: str) -> Dict[str, Any]:
     """Simple fallback parsing using regex patterns"""
